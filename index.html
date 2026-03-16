@@ -2582,6 +2582,8 @@ window.saveBankInfo = async function() {
   try {
     await updateDoc(doc(db,'goviral_users', CU.uid), { bank, accNo, accName });
     CU.bank = bank; CU.accNo = accNo; CU.accName = accName;
+    // 🏆 Trigger campaign reward for bank account addition
+    await onCampBankAccountAdded(CU.uid);
     toast('Bank details saved ✅','ok');
     fillWorkerProfile();
   } catch(e) { toast('Failed: '+e.message,'err'); }
@@ -10046,37 +10048,75 @@ async function processCampReferral(newUser) {
     referredName: newUser.name, referredEmail: newUser.email,
     referredPhone: newUser.phone || '',
     deviceFingerprint: fp,
-    status: 'pending', // pending until phone verified (worker) or deposit (business)
+    status: 'pending',
+    pendingReason: 'Waiting for referred user to verify BVN and add bank account',
     rewardPaid: false,
     createdAt: serverTimestamp()
   });
   localStorage.removeItem('goviral_camp_ref');
 }
 
-// Called when referred worker verifies phone
-async function onCampPhoneVerified(uid, phone) {
+// Called when referred worker verifies phone (no longer triggers reward — kept for compat)
+async function onCampPhoneVerified(uid, phone) {}
+
+// Called when referred worker adds bank account — triggers reward if BVN also verified
+async function onCampBankAccountAdded(uid) {
   const refs = await getDocs(query(collection(db,'goviral_campaign_referrals'),
     where('referredUid','==',uid), where('status','==','pending')));
   for (const r of refs.docs) {
     const rd = r.data();
     const campDoc = await getDoc(doc(db,'goviral_campaigns', rd.campId));
-    if (!campDoc.exists()) continue;
+    if (!campDoc.exists()) {
+      await updateDoc(r.ref, { status: 'invalid', invalidReason: 'Campaign no longer exists' }); continue;
+    }
     const camp = campDoc.data();
     const now = Date.now();
     const endMs = camp.endDate?.toDate ? camp.endDate.toDate().getTime() : new Date(camp.endDate).getTime();
-    if (!camp.active || now > endMs) continue;
+    if (!camp.active) {
+      await updateDoc(r.ref, { status: 'invalid', invalidReason: 'Campaign was stopped by admin' }); continue;
+    }
+    if (now > endMs) {
+      await updateDoc(r.ref, { status: 'invalid', invalidReason: 'Campaign ended before requirements were completed' }); continue;
+    }
+    // Check BVN verified
+    const uSnap = await getDoc(doc(db,'goviral_users', uid));
+    const uData = uSnap.data() || {};
+    if (!uData.campBvnVerified || uData.campBvnCampId !== rd.campId) {
+      await updateDoc(r.ref, { pendingReason: 'Bank account added — BVN verification still required' }); continue;
+    }
+    // Check duplicate BVN
+    const bvn = uData.campBvn || '';
+    if (bvn) {
+      const bvnDup = await getDocs(query(collection(db,'goviral_campaign_referrals'),
+        where('campId','==',rd.campId), where('referredBvn','==',bvn), where('status','==','earned')));
+      if (!bvnDup.empty) {
+        await updateDoc(r.ref, { status: 'invalid', invalidReason: 'BVN already used to earn a reward in this campaign' }); continue;
+      }
+    }
+    // Check duplicate bank account
+    const accNo = uData.accNo || '';
+    if (accNo) {
+      const accDup = await getDocs(query(collection(db,'goviral_campaign_referrals'),
+        where('campId','==',rd.campId), where('referredBankAccNo','==',accNo), where('status','==','earned')));
+      if (!accDup.empty) {
+        await updateDoc(r.ref, { status: 'invalid', invalidReason: 'Bank account already used in this campaign' }); continue;
+      }
+    }
     const reward = camp.rewardSignup || 0;
     if (reward <= 0) continue;
-    // Pay referrer
+    // All checks passed — pay referrer
     await updateDoc(doc(db,'goviral_users', rd.refUid), {
       campaignWallet: increment(reward),
       totalCampaignEarned: increment(reward)
     });
-    await updateDoc(r.ref, { status: 'earned', rewardPaid: true, paidAt: serverTimestamp(), rewardAmount: reward });
-    // Notify referrer
+    await updateDoc(r.ref, {
+      status: 'earned', rewardPaid: true, paidAt: serverTimestamp(),
+      rewardAmount: reward, referredBankAccNo: accNo, referredBvn: bvn,
+      pendingReason: null
+    });
     await createNotif(rd.refUid, {
       icon: '🏆', title: 'Campaign Reward Earned!',
-      message: `You earned ${fmtMoney(reward)} — someone you referred just verified their phone!`
+      message: `You earned ${fmtMoney(reward)} — someone you referred just completed verification!`
     });
   }
 }
@@ -10151,11 +10191,10 @@ async function fillCampaignPage(panelId) {
 
   // User's campaign wallet
   const userDoc = await getDoc(doc(db,'goviral_users', CU.uid));
-  const campWallet = userDoc.data()?.campaignWallet || 0;
-
-  // Phone verification check (worker)
-  const phoneVerified = CU.phoneVerified || userDoc.data()?.phoneVerified;
-
+  const uData = userDoc.data() || {};
+  const campWallet = uData.campaignWallet || 0;
+  const bvnVerified = uData.campBvnVerified || false;
+  const deviceId = getDeviceFingerprint();
   const isActive = camp.active && Date.now() >= startDate.getTime() && Date.now() <= endDate.getTime();
 
   el.innerHTML = `
@@ -10193,10 +10232,42 @@ async function fillCampaignPage(panelId) {
       </div>
     </div>
 
+    <!-- Device ID Card -->
+    <div class="panel" style="border-color:rgba(99,102,241,0.3);background:rgba(99,102,241,0.04);margin-bottom:16px;">
+      <div style="font-size:.72rem;font-weight:700;color:#818cf8;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;">📱 Your Device ID</div>
+      <div style="font-family:monospace;font-size:.85rem;color:var(--txt);background:var(--dark);border-radius:8px;padding:10px 12px;border:1px solid var(--bdr);letter-spacing:2px;">${deviceId}</div>
+      <div style="font-size:.72rem;color:var(--mut);margin-top:6px;">This ID is used to track your referral activity. It may change if you switch browsers or clear your cache.</div>
+    </div>
+
+    <!-- BVN Verification -->
+    ${!bvnVerified ? `
+    <div class="panel" style="border-color:rgba(245,166,35,0.4);background:rgba(245,166,35,0.05);margin-bottom:16px;">
+      <div style="font-weight:700;color:var(--gold);margin-bottom:6px;">⚠️ BVN Verification Required</div>
+      <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:10px;padding:12px 14px;margin-bottom:14px;">
+        <div style="font-size:.8rem;font-weight:700;color:#818cf8;margin-bottom:4px;">🔒 Why we need your BVN</div>
+        <p style="font-size:.78rem;color:var(--mut);line-height:1.7;margin:0;">Your BVN is <strong style="color:var(--txt);">only used to prevent multiple accounts</strong> from gaming the campaign — nothing else. We do <strong style="color:var(--txt);">not</strong> use it to access your bank account, check your balance, or share it with any third party. It is stored securely and only checked for duplicates within this campaign.</p>
+      </div>
+      <p style="font-size:.82rem;color:var(--mut);margin-bottom:12px;">Enter your BVN to participate and earn campaign rewards.</p>
+      <div class="fg"><label style="font-size:.78rem;">Enter your 11-digit BVN</label>
+        <input id="campBvnInput" type="tel" maxlength="11" placeholder="22XXXXXXXXX" style="width:100%;letter-spacing:2px;"/>
+        <div style="font-size:.72rem;color:var(--mut);margin-top:4px;">Your BVN is on your bank app under Account Details or dial *565*0# on your registered number.</div>
+      </div>
+      <button class="btn btn-red btn-sm" onclick="submitCampBvn('${campId}','${panelId}')">✅ Verify BVN</button>
+    </div>` : `
+    <div class="panel" style="border-color:rgba(34,197,94,0.3);background:rgba(34,197,94,0.04);margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-size:1.4rem;">✅</span>
+        <div>
+          <div style="font-weight:700;color:var(--grn);">BVN Verified</div>
+          <div style="font-size:.75rem;color:var(--mut);">Your identity is confirmed. You can earn campaign rewards.</div>
+        </div>
+      </div>
+    </div>`}
+
     <div class="camp-link-box">
       <div style="font-weight:700;font-size:.9rem;margin-bottom:4px;">🔗 Your Campaign Link</div>
       <div style="font-size:.75rem;color:var(--mut);margin-bottom:6px;">Share this link — it expires when the campaign ends</div>
-      <div class="camp-link-url" id="campLinkUrl">${campLink}</div>
+      <div class="camp-link-url">${campLink}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
         <button class="btn btn-red btn-sm" onclick="navigator.clipboard.writeText('${campLink}').then(()=>toast('Link copied! 📋','ok'))">📋 Copy Link</button>
         <button class="btn btn-ghost btn-sm" onclick="window.open('https://wa.me/?text='+encodeURIComponent('Join GoViral and earn money online! Use my campaign link: ${campLink}'),'_blank')">💬 Share on WhatsApp</button>
@@ -10207,28 +10278,23 @@ async function fillCampaignPage(panelId) {
       <div style="font-weight:700;margin-bottom:8px;">🎯 How to Earn</div>
       <div style="font-size:.83rem;color:var(--mut);line-height:1.8;">
         ${isWorker ? `
-        <div>1️⃣ Share your campaign link with friends</div>
-        <div>2️⃣ They sign up using your link</div>
-        <div>3️⃣ They verify their phone number ✅</div>
-        <div>4️⃣ You earn <strong style="color:var(--gold);">${fmtMoney(reward)}</strong> ${rewardLabel}</div>
+        <div>1️⃣ Verify your BVN above</div>
+        <div>2️⃣ Share your campaign link with friends</div>
+        <div>3️⃣ They sign up using your link</div>
+        <div>4️⃣ They verify their BVN + add bank account ✅</div>
+        <div>5️⃣ You earn <strong style="color:var(--gold);">${fmtMoney(reward)}</strong> ${rewardLabel}</div>
         ` : `
-        <div>1️⃣ Share your campaign link with businesses</div>
-        <div>2️⃣ They sign up as a business using your link</div>
-        <div>3️⃣ They fund their wallet (any amount) ✅</div>
-        <div>4️⃣ You earn <strong style="color:var(--gold);">${fmtMoney(reward)}</strong> ${rewardLabel}</div>
+        <div>1️⃣ Verify your BVN above</div>
+        <div>2️⃣ Share your campaign link with businesses</div>
+        <div>3️⃣ They sign up as a business using your link</div>
+        <div>4️⃣ They fund their wallet (any amount) ✅</div>
+        <div>5️⃣ You earn <strong style="color:var(--gold);">${fmtMoney(reward)}</strong> ${rewardLabel}</div>
         `}
         <div style="margin-top:8px;padding:8px 10px;background:rgba(245,166,35,0.08);border-radius:8px;border-left:3px solid var(--gold);">
           💰 Rewards go into your <strong style="color:var(--gold);">Campaign Wallet</strong> and can be withdrawn separately.
         </div>
       </div>
     </div>
-
-    ${isWorker && !phoneVerified ? `
-    <div class="panel" style="border-color:rgba(245,166,35,0.4);background:rgba(245,166,35,0.05);margin-bottom:16px;">
-      <div style="font-weight:700;color:var(--gold);margin-bottom:6px;">⚠️ Verify Your Phone First</div>
-      <p style="font-size:.82rem;color:var(--mut);margin-bottom:12px;">You need to verify your own phone number before you can earn campaign rewards.</p>
-      <button class="btn btn-red btn-sm" onclick="showCampPhoneOtp('${CU.phone||''}').then(v=>{if(v)fillCampaignPage('${panelId}')})">📱 Verify My Phone Now</button>
-    </div>` : ''}
 
     ${campWallet > 0 ? `
     <div class="panel" style="border-color:rgba(34,197,94,0.3);background:rgba(34,197,94,0.04);margin-bottom:16px;">
@@ -10252,12 +10318,22 @@ async function fillCampaignPage(panelId) {
           : r.status === 'invalid'
           ? `<span class="camp-badge invalid">❌ Invalid</span>`
           : `<span class="camp-badge pending">⏳ Pending</span>`;
-        return `<div class="camp-ref-row">
-          <div>
-            <div style="font-weight:600;">${r.referredName||'Unknown'}</div>
-            <div style="font-size:.74rem;color:var(--mut);">${r.referredEmail||''} · ${ts.toLocaleDateString('en-NG',{day:'numeric',month:'short',year:'numeric'})}</div>
+        const reason = r.status === 'pending'
+          ? `<div style="font-size:.72rem;color:var(--gold);margin-top:3px;">⏳ ${r.pendingReason || 'Waiting for referred user to add bank account'}</div>`
+          : r.status === 'invalid'
+          ? `<div style="font-size:.72rem;color:var(--red);margin-top:3px;">❌ ${r.invalidReason || 'Invalid referral'}</div>`
+          : '';
+        const devId = r.deviceFingerprint ? `<div style="font-size:.68rem;color:var(--mut);margin-top:2px;font-family:monospace;">📱 Device: ${r.deviceFingerprint}</div>` : '';
+        return `<div class="camp-ref-row" style="flex-direction:column;align-items:flex-start;gap:6px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;width:100%;">
+            <div>
+              <div style="font-weight:600;">${r.referredName||'Unknown'}</div>
+              <div style="font-size:.74rem;color:var(--mut);">${r.referredEmail||''} · ${ts.toLocaleDateString('en-NG',{day:'numeric',month:'short',year:'numeric'})}</div>
+              ${devId}
+              ${reason}
+            </div>
+            <div>${badge}</div>
           </div>
-          <div>${badge}</div>
         </div>`;
       }).join('')}
     </div>`;
@@ -10337,31 +10413,69 @@ async function fillAdminCampaign() {
 
 async function buildAdminCampStats(camp) {
   const refs = await getDocs(query(collection(db,'goviral_campaign_referrals'), where('campId','==',camp.id)));
-  let total = 0, earned = 0, pending = 0, totalPaid = 0;
+  let total = 0, earned = 0, pending = 0, invalid = 0, totalPaid = 0;
+  const refList = [];
   refs.forEach(d => {
-    const r = d.data();
+    const r = { id: d.id, ...d.data() };
     total++;
     if (r.status === 'earned') { earned++; totalPaid += (r.rewardAmount||0); }
     else if (r.status === 'pending') pending++;
+    else if (r.status === 'invalid') invalid++;
+    refList.push(r);
   });
+  refList.sort((a,b) => (b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
 
   const endDate = camp.endDate?.toDate ? camp.endDate.toDate() : new Date(camp.endDate);
-  const timeLeft = campTimeLeft(endDate);
-
-  // Start live countdown in admin panel
   setTimeout(() => startCampTimer(endDate, 'adminCampCountdown'), 200);
+
+  const refRows = refList.map(r => {
+    const ts = r.createdAt?.toDate ? r.createdAt.toDate() : new Date(r.createdAt||0);
+    const statusBadge = r.status === 'earned'
+      ? `<span class="camp-badge earned">✅ Earned</span>`
+      : r.status === 'invalid'
+      ? `<span class="camp-badge invalid">❌ Invalid</span>`
+      : `<span class="camp-badge pending">⏳ Pending</span>`;
+    const bvnMasked = r.referredBvn ? r.referredBvn.slice(0,3) + 'XXXXXXXX' : '—';
+    const reason = r.status === 'pending' && r.pendingReason
+      ? `<div style="font-size:.68rem;color:var(--gold);">⏳ ${r.pendingReason}</div>`
+      : r.status === 'invalid' && r.invalidReason
+      ? `<div style="font-size:.68rem;color:var(--red);">❌ ${r.invalidReason}</div>`
+      : '';
+    return `<tr style="border-bottom:1px solid var(--bdr);font-size:.78rem;">
+      <td style="padding:10px 8px;">
+        <div style="font-weight:700;">${r.referredName||'—'}</div>
+        <div style="color:var(--mut);font-size:.7rem;">${r.referredEmail||''}</div>
+        <div style="color:var(--mut);font-size:.7rem;">${ts.toLocaleDateString('en-NG',{day:'numeric',month:'short',year:'numeric'})}</div>
+      </td>
+      <td style="padding:10px 8px;">
+        <div style="font-family:monospace;font-size:.7rem;color:#818cf8;">${r.deviceFingerprint||'—'}</div>
+      </td>
+      <td style="padding:10px 8px;">
+        <div style="font-family:monospace;font-size:.7rem;color:var(--gold);">${bvnMasked}</div>
+        <div style="font-size:.68rem;color:var(--mut);">${r.referredBankAccNo ? '🏦 '+r.referredBankAccNo : 'No bank yet'}</div>
+      </td>
+      <td style="padding:10px 8px;">
+        ${statusBadge}
+        ${reason}
+        ${r.status === 'earned' ? `<div style="font-size:.68rem;color:var(--grn);margin-top:2px;">${fmtMoney(r.rewardAmount||0)}</div>` : ''}
+      </td>
+      <td style="padding:10px 8px;font-size:.7rem;color:var(--mut);">
+        ${r.refUid ? `<div style="font-size:.68rem;">Referred by:</div><div style="font-size:.7rem;color:var(--txt);">${r.refUid.slice(0,10)}…</div>` : '—'}
+      </td>
+    </tr>`;
+  }).join('');
 
   return `
     <div class="panel" style="margin-bottom:20px;border-color:rgba(245,166,35,0.3);background:rgba(245,166,35,0.04);">
-      <div class="panel-title" style="color:var(--gold);">📊 Live Campaign Stats — ${camp.name}</div>
+      <div class="panel-title" style="color:var(--gold);">📊 Live Stats — ${camp.name}</div>
       <div id="adminCampCountdown" style="margin-bottom:16px;"></div>
-      <div class="cards-row" style="margin-bottom:0;">
+      <div class="cards-row" style="margin-bottom:16px;">
         <div class="card" style="text-align:center;">
           <div class="card-label">Total Referrals</div>
           <div class="card-val" style="color:#818cf8;">${total}</div>
         </div>
         <div class="card" style="text-align:center;">
-          <div class="card-label">Rewards Earned</div>
+          <div class="card-label">Earned</div>
           <div class="card-val" style="color:var(--grn);">${earned}</div>
         </div>
         <div class="card" style="text-align:center;">
@@ -10369,10 +10483,29 @@ async function buildAdminCampStats(camp) {
           <div class="card-val" style="color:var(--gold);">${pending}</div>
         </div>
         <div class="card" style="text-align:center;">
+          <div class="card-label">Invalid</div>
+          <div class="card-val" style="color:var(--red);">${invalid}</div>
+        </div>
+        <div class="card" style="text-align:center;grid-column:span 2;">
           <div class="card-label">Total Paid Out</div>
-          <div class="card-val" style="color:var(--red);">${fmtMoney(totalPaid)}</div>
+          <div class="card-val" style="color:var(--gold);font-size:2rem;">${fmtMoney(totalPaid)}</div>
         </div>
       </div>
+      ${refList.length > 0 ? `
+      <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;min-width:560px;">
+          <thead>
+            <tr style="background:var(--dark3);border-bottom:1px solid var(--bdr);">
+              <th style="padding:8px;text-align:left;font-size:.68rem;color:var(--mut);text-transform:uppercase;">User</th>
+              <th style="padding:8px;text-align:left;font-size:.68rem;color:var(--mut);text-transform:uppercase;">📱 Device ID</th>
+              <th style="padding:8px;text-align:left;font-size:.68rem;color:var(--mut);text-transform:uppercase;">🔐 BVN / Bank</th>
+              <th style="padding:8px;text-align:left;font-size:.68rem;color:var(--mut);text-transform:uppercase;">Status</th>
+              <th style="padding:8px;text-align:left;font-size:.68rem;color:var(--mut);text-transform:uppercase;">Referrer</th>
+            </tr>
+          </thead>
+          <tbody>${refRows}</tbody>
+        </table>
+      </div>` : `<div style="text-align:center;padding:20px;color:var(--mut);font-size:.84rem;">No referrals yet.</div>`}
     </div>`;
 }
 
@@ -10441,12 +10574,46 @@ const _origPresenceUpdate = null;
 
 // ── EXPOSE CAMPAIGN FUNCTIONS TO GLOBAL SCOPE ──
 // Required because onclick="" attributes run in window scope, not module scope
-window.showCampPhoneOtp   = showCampPhoneOtp;
-window.fillCampaignPage   = fillCampaignPage;
-window.fillAdminCampaign  = fillAdminCampaign;
-window.startCampTimer     = startCampTimer;
+window.showCampPhoneOtp      = showCampPhoneOtp;
+window.fillCampaignPage      = fillCampaignPage;
+window.fillAdminCampaign     = fillAdminCampaign;
+window.startCampTimer        = startCampTimer;
 window.onCampBusinessDeposit = onCampBusinessDeposit;
 window.onCampPhoneVerified   = onCampPhoneVerified;
+window.onCampBankAccountAdded = onCampBankAccountAdded;
+
+window.submitCampBvn = async function(campId, panelId) {
+  const bvn = document.getElementById('campBvnInput')?.value.trim();
+  if (!bvn || bvn.length !== 11 || !/^\d{11}$/.test(bvn)) {
+    toast('Enter a valid 11-digit BVN','err'); return;
+  }
+  try {
+    // Check duplicate BVN already registered in this campaign
+    const bvnUserCheck = await getDocs(query(collection(db,'goviral_users'),
+      where('campBvn','==',bvn), where('campBvnCampId','==',campId)));
+    if (!bvnUserCheck.empty) {
+      toast('This BVN is already registered in this campaign','err'); return;
+    }
+    // Save BVN masked to user profile
+    await updateDoc(doc(db,'goviral_users', CU.uid), {
+      campBvn: bvn,
+      campBvnVerified: true,
+      campBvnCampId: campId,
+      campBvnAt: serverTimestamp()
+    });
+    CU.campBvnVerified = true;
+    // Update any pending referral record with BVN
+    const myRefs = await getDocs(query(collection(db,'goviral_campaign_referrals'),
+      where('referredUid','==',CU.uid), where('campId','==',campId)));
+    for (const r of myRefs.docs) {
+      await updateDoc(r.ref, { referredBvn: bvn, pendingReason: 'BVN verified — waiting for bank account to be added' });
+    }
+    toast('BVN verified! ✅ Now add your bank account to earn rewards.','ok');
+    fillCampaignPage(panelId);
+    // Trigger reward check in case bank account already exists
+    await onCampBankAccountAdded(CU.uid);
+  } catch(e) { toast('Failed: '+e.message,'err'); }
+};
 
 // Attach on-login campaign referral check
 (function() {
