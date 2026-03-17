@@ -53,7 +53,7 @@ app.post('/termiiSendOtp', async (req, res) => {
   });
 
   try {
-    const termiiRes = await fetch('https://api.ng.termii.com/api/sms/send', {
+    const termiiRes = await fetch('https://v3.api.termii.com/api/sms/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
