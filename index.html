@@ -684,14 +684,14 @@ input:focus,textarea:focus,select:focus{border-color:var(--red)!important;box-sh
 .bottom-nav.new-ui {
   background:#000 !important;
   border:1.5px solid #ff2222 !important;
-  border-bottom:none !important;
-  border-radius:28px 28px 0 0 !important;
-  padding:12px 8px 24px !important;
+  border-radius:50px !important;
+  padding:10px 16px 14px !important;
   position:fixed !important;
-  left:8px !important;
-  right:8px !important;
-  box-shadow:0 -4px 20px rgba(255,34,34,0.4), 0 0 30px rgba(255,34,34,0.15) !important;
-  margin:0 !important;
+  bottom:12px !important;
+  left:12px !important;
+  right:12px !important;
+  box-shadow:0 0 12px rgba(255,34,34,0.6), 0 0 28px rgba(255,34,34,0.2) !important;
+  z-index:97 !important;
 }
 .bottom-nav.new-ui .bottom-nav-inner {
   display:flex !important;
@@ -807,7 +807,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--red)!important;box-sh
           <span class="pill-amount"><span id="navPillAmt">₦0.00</span></span>
         </div>
         <div class="pill-divider"></div>
-        <div class="pill-right" id="pillPlusBtn">
+        <div class="pill-right" id="pillPlusBtn" onclick="handlePillDeposit()" style="cursor:pointer;">
           <span class="pill-plus-icon">+</span>
         </div>
       </div>
@@ -14194,17 +14194,10 @@ function handlePillClick() {
   else if (CU.role === 'business') switchPanel('bizWallet');
   else if (CU.role === 'admin') switchPanel('adminFinance');
 }
-// Attach + button click after DOM ready
-document.addEventListener('DOMContentLoaded', function() {
-  var btn = document.getElementById('pillPlusBtn');
-  if (btn) btn.addEventListener('click', function(e){ e.stopPropagation(); handlePillDeposit(); });
-});
-
 function handlePillDeposit() {
   if (!CU) return;
-  // + button → goes to fund/deposit page for each role
   if (CU.role === 'business') { switchPanel('bizWallet'); }
-  else if (CU.role === 'worker') { switchPanel('workerWithdraw'); }
+  else if (CU.role === 'worker') { switchPanel('workerOverview'); }
   else if (CU.role === 'admin') { switchPanel('adminFunds'); }
 }
 </script>
