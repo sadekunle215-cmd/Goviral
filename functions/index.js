@@ -140,14 +140,25 @@ function generateRequestId() {
 // GET VTPass wallet balance
 app.post('/vtpass/balance', async (req, res) => {
   try {
+    const credentials = Buffer.from(`${VTPASS_PUBLIC_KEY}:${VTPASS_SECRET_KEY}`).toString('base64');
     const response = await fetch(`${VTPASS_BASE_URL}/balance`, {
       method: 'GET',
-      headers: vtpassHeaders()
+      headers: {
+        'Authorization': `Basic ${credentials}`,
+        'api-key': VTPASS_API_KEY,
+        'Content-Type': 'application/json'
+      }
     });
-    const data = await response.json();
-    res.json({ success: true, balance: data?.contents?.balance ?? 0, data });
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
+    if (data?.code === '000' || data?.contents?.balance !== undefined) {
+      res.json({ success: true, balance: data?.contents?.balance ?? 0, data });
+    } else {
+      res.json({ success: false, error: data?.response_description || 'VTPass error', data });
+    }
   } catch (e) {
-    res.status(500).json({ success: false, error: 'Failed to fetch VTPass balance.' });
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
