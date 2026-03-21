@@ -19,12 +19,221 @@ const VTPASS_BASE_URL   = process.env.VTPASS_ENV === 'live'
   ? 'https://api-service.vtpass.com/api'
   : 'https://sandbox.vtpass.com/api';
 
+const PEYFLEX_TOKEN   = process.env.PEYFLEX_TOKEN;
+const PEYFLEX_BASE    = 'https://client.peyflex.com.ng';
+
 app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   next();
+});
+
+// ── PEYFLEX HELPER ──────────────────────────────────────────────
+
+async function peyflexGet(path) {
+  const res = await fetch(`${PEYFLEX_BASE}${path}`, {
+    headers: { 'Authorization': `Token ${PEYFLEX_TOKEN}`, 'Content-Type': 'application/json' }
+  });
+  return res.json();
+}
+
+async function peyflexPost(path, body) {
+  const res = await fetch(`${PEYFLEX_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Authorization': `Token ${PEYFLEX_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+
+// ── PEYFLEX WALLET BALANCE ──────────────────────────────────────
+
+app.get('/peyflex/balance', async (req, res) => {
+  try {
+    const data = await peyflexGet('/api/wallet/');
+    res.json({ success: true, balance: data.wallet_credit, data });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── PEYFLEX AIRTIME ─────────────────────────────────────────────
+
+app.get('/peyflex/airtime/networks', async (req, res) => {
+  try {
+    const data = await peyflexGet('/api/airtime/networks/');
+    res.json({ success: true, networks: data.networks || [] });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/peyflex/airtime', async (req, res) => {
+  const { network, amount, mobile_number, userId, userName } = req.body;
+  if (!network || !amount || !mobile_number || !userId) {
+    return res.status(400).json({ success: false, error: 'Missing required fields.' });
+  }
+  try {
+    const data = await peyflexPost('/api/airtime/topup/', { network, amount, mobile_number });
+    await db.collection('goviral_airtime_orders').add({
+      userId, userName, phone: mobile_number, amount, network,
+      provider: 'peyflex', type: 'airtime',
+      status: data.status === 'SUCCESS' ? 'success' : 'failed',
+      providerResponse: JSON.stringify(data).substring(0, 500),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    if (data.status === 'SUCCESS') {
+      res.json({ success: true, message: 'Airtime sent successfully!', data });
+    } else {
+      res.status(400).json({ success: false, error: data.message || 'Airtime failed', data });
+    }
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── PEYFLEX DATA ────────────────────────────────────────────────
+
+app.get('/peyflex/data/plans', async (req, res) => {
+  const { network } = req.query;
+  if (!network) return res.status(400).json({ success: false, error: 'network required' });
+  try {
+    const data = await peyflexGet(`/api/data/plans/?network=${network}`);
+    res.json({ success: true, plans: data.plans || [] });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/peyflex/data', async (req, res) => {
+  const { network, plan_code, mobile_number, amount, userId, userName } = req.body;
+  if (!network || !plan_code || !mobile_number || !userId) {
+    return res.status(400).json({ success: false, error: 'Missing required fields.' });
+  }
+  try {
+    const data = await peyflexPost('/api/data/purchase/', { network, plan_code, mobile_number });
+    await db.collection('goviral_airtime_orders').add({
+      userId, userName, phone: mobile_number, amount, network, plan_code,
+      provider: 'peyflex', type: 'data',
+      status: data.status === 'SUCCESS' ? 'success' : 'failed',
+      providerResponse: JSON.stringify(data).substring(0, 500),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    if (data.status === 'SUCCESS') {
+      res.json({ success: true, message: 'Data purchased successfully!', data });
+    } else {
+      res.status(400).json({ success: false, error: data.message || 'Data purchase failed', data });
+    }
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── PEYFLEX CABLE TV ────────────────────────────────────────────
+
+app.get('/peyflex/cable/providers', async (req, res) => {
+  try {
+    const data = await peyflexGet('/api/cable/providers/');
+    res.json({ success: true, providers: data.providers || [] });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.get('/peyflex/cable/plans', async (req, res) => {
+  const { provider } = req.query;
+  if (!provider) return res.status(400).json({ success: false, error: 'provider required' });
+  try {
+    const data = await peyflexGet(`/api/cable/plans/${provider}/`);
+    res.json({ success: true, plans: data.plans || [] });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/peyflex/cable/verify', async (req, res) => {
+  const { iuc, identifier } = req.body;
+  if (!iuc || !identifier) return res.status(400).json({ success: false, error: 'iuc and identifier required' });
+  try {
+    const data = await peyflexPost('/api/cable/verify/', { iuc, identifier });
+    res.json({ success: true, data });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/peyflex/cable', async (req, res) => {
+  const { identifier, plan, iuc, phone, amount, userId, userName } = req.body;
+  if (!identifier || !plan || !iuc || !userId) {
+    return res.status(400).json({ success: false, error: 'Missing required fields.' });
+  }
+  try {
+    const data = await peyflexPost('/api/cable/subscribe/', { identifier, plan, iuc, phone, amount: String(amount) });
+    await db.collection('goviral_airtime_orders').add({
+      userId, userName, iuc, amount, provider: identifier, plan,
+      type: 'cable', providerName: 'peyflex',
+      status: data.status === 'SUCCESS' ? 'success' : 'failed',
+      providerResponse: JSON.stringify(data).substring(0, 500),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    if (data.status === 'SUCCESS') {
+      res.json({ success: true, message: 'Cable TV subscription successful!', data });
+    } else {
+      res.status(400).json({ success: false, error: data.message || 'Cable subscription failed', data });
+    }
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── PEYFLEX ELECTRICITY ─────────────────────────────────────────
+
+app.get('/peyflex/electricity/plans', async (req, res) => {
+  try {
+    const data = await peyflexGet('/api/electricity/plans/?identifier=electricity');
+    res.json({ success: true, plans: data.plans || [] });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.get('/peyflex/electricity/verify', async (req, res) => {
+  const { meter, plan, type } = req.query;
+  if (!meter || !plan) return res.status(400).json({ success: false, error: 'meter and plan required' });
+  try {
+    const data = await peyflexGet(`/api/electricity/verify/?identifier=electricity&meter=${meter}&plan=${plan}&type=${type || 'prepaid'}`);
+    res.json({ success: true, data });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/peyflex/electricity', async (req, res) => {
+  const { meter, plan, amount, type, phone, userId, userName } = req.body;
+  if (!meter || !plan || !amount || !userId) {
+    return res.status(400).json({ success: false, error: 'Missing required fields.' });
+  }
+  try {
+    const data = await peyflexPost('/api/electricity/subscribe/', {
+      identifier: 'electricity', meter, plan, amount: String(amount), type: type || 'prepaid', phone
+    });
+    await db.collection('goviral_airtime_orders').add({
+      userId, userName, meter, amount, plan, type: 'electricity',
+      provider: 'peyflex',
+      status: data.status === 'SUCCESS' ? 'success' : 'failed',
+      providerResponse: JSON.stringify(data).substring(0, 500),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    if (data.status === 'SUCCESS') {
+      res.json({ success: true, message: 'Electricity recharge successful!', token: data.token || '', data });
+    } else {
+      res.status(400).json({ success: false, error: data.message || 'Electricity recharge failed', data });
+    }
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // ── TERMII OTP ──────────────────────────────────────────────────
@@ -112,7 +321,6 @@ app.post('/termiiVerifyOtp', async (req, res) => {
 
 // ── VTPASS ──────────────────────────────────────────────────────
 
-// Correct VTPass auth: Basic base64(publicKey:secretKey)
 function vtpassAuth() {
   const credentials = Buffer.from(`${VTPASS_PUBLIC_KEY}:${VTPASS_SECRET_KEY}`).toString('base64');
   return {
@@ -127,7 +335,6 @@ function generateRequestId() {
   return `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${Math.random().toString(36).slice(2,8).toUpperCase()}`;
 }
 
-// Test balance
 app.post('/vtpass/balance', async (req, res) => {
   try {
     const response = await fetch(`${VTPASS_BASE_URL}/balance`, {
@@ -135,7 +342,6 @@ app.post('/vtpass/balance', async (req, res) => {
       headers: vtpassAuth()
     });
     const text = await response.text();
-    console.log('VTPass balance raw:', text);
     let data;
     try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
     if (data?.code === '000' || data?.contents?.balance !== undefined) {
@@ -148,7 +354,6 @@ app.post('/vtpass/balance', async (req, res) => {
   }
 });
 
-// Buy airtime
 app.post('/vtpass/airtime', async (req, res) => {
   const { phone, amount, network, userId, userName } = req.body;
   if (!phone || !amount || !network || !userId) {
@@ -169,10 +374,8 @@ app.post('/vtpass/airtime', async (req, res) => {
       body: JSON.stringify({ request_id: requestId, serviceID, amount: String(amount), phone })
     });
     const text = await response.text();
-    console.log('VTPass airtime raw:', text);
     let data;
     try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
-
     await db.collection('goviral_airtime').add({
       userId, userName, phone, amount, network: serviceID, requestId,
       status: data?.code === '000' ? 'success' : 'failed',
@@ -180,7 +383,6 @@ app.post('/vtpass/airtime', async (req, res) => {
       type: 'airtime',
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
-
     if (data?.code === '000') {
       res.json({ success: true, message: 'Airtime sent!', data });
     } else {
@@ -191,7 +393,6 @@ app.post('/vtpass/airtime', async (req, res) => {
   }
 });
 
-// Buy data
 app.post('/vtpass/data', async (req, res) => {
   const { phone, variation_code, network, userId, userName, amount } = req.body;
   if (!phone || !variation_code || !network || !userId) {
@@ -216,10 +417,8 @@ app.post('/vtpass/data', async (req, res) => {
       })
     });
     const text = await response.text();
-    console.log('VTPass data raw:', text);
     let data;
     try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
-
     await db.collection('goviral_airtime').add({
       userId, userName, phone, amount, network: serviceID, variation_code, requestId,
       status: data?.code === '000' ? 'success' : 'failed',
@@ -227,7 +426,6 @@ app.post('/vtpass/data', async (req, res) => {
       type: 'data',
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
-
     if (data?.code === '000') {
       res.json({ success: true, message: 'Data sent!', data });
     } else {
@@ -238,7 +436,6 @@ app.post('/vtpass/data', async (req, res) => {
   }
 });
 
-// Get data variations
 app.post('/vtpass/variations', async (req, res) => {
   const { serviceID } = req.body;
   if (!serviceID) {
