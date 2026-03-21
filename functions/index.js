@@ -12,6 +12,10 @@ const TERMII_SENDER_ID = 'N-Alert';
 const TERMII_CHANNEL   = 'generic';
 const OTP_TTL_MS       = 10 * 60 * 1000;
 
+const KUDISMS_USERNAME = process.env.KUDISMS_USERNAME;
+const KUDISMS_PASSWORD = process.env.KUDISMS_PASSWORD;
+const KUDISMS_SENDER   = 'GoViral';
+
 const VTPASS_API_KEY    = process.env.VTPASS_API_KEY;
 const VTPASS_PUBLIC_KEY = process.env.VTPASS_PUBLIC_KEY;
 const VTPASS_SECRET_KEY = process.env.VTPASS_SECRET_KEY;
@@ -266,21 +270,52 @@ app.post('/termiiSendOtp', async (req, res) => {
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
   try {
-    const termiiRes = await fetch('https://v3.api.termii.com/api/sms/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        to: phone.replace('+', ''),
-        from: TERMII_SENDER_ID,
-        sms: `Your GoViral verification code is: ${otp}. Valid for 10 minutes. Do not share.`,
-        type: 'plain',
-        api_key: TERMII_API_KEY,
-        channel: TERMII_CHANNEL
-      })
-    });
-    const data = await termiiRes.json();
-    if (!data.message_id && data.code !== 'ok') {
-      res.status(500).json({ success: false, error: 'Failed to send SMS.' });
+    // Try Kudisms first, fallback to Termii
+    const mobile = phone.replace('+', '');
+    const smsText = `Your GoViral verification code is: ${otp}. Valid for 10 minutes. Do not share.`;
+    
+    let smsSent = false;
+
+    // Try Kudisms
+    if (KUDISMS_USERNAME && KUDISMS_PASSWORD) {
+      try {
+        const kudisRes = await fetch(`https://account.kudisms.net/api/?username=${encodeURIComponent(KUDISMS_USERNAME)}&password=${encodeURIComponent(KUDISMS_PASSWORD)}&message=${encodeURIComponent(smsText)}&sender=${KUDISMS_SENDER}&mobiles=${mobile}`, {
+          method: 'GET'
+        });
+        const kudisText = await kudisRes.text();
+        console.log('Kudisms response:', kudisText);
+        if (kudisText.includes('1701') || kudisText.toLowerCase().includes('success') || kudisText.startsWith('1')) {
+          smsSent = true;
+        }
+      } catch(e) {
+        console.warn('Kudisms failed:', e.message);
+      }
+    }
+
+    // Fallback to Termii if Kudisms failed
+    if (!smsSent && TERMII_API_KEY) {
+      try {
+        const termiiRes = await fetch('https://v3.api.termii.com/api/sms/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            to: mobile,
+            from: TERMII_SENDER_ID,
+            sms: smsText,
+            type: 'plain',
+            api_key: TERMII_API_KEY,
+            channel: TERMII_CHANNEL
+          })
+        });
+        const data = await termiiRes.json();
+        if (data.message_id || data.code === 'ok') smsSent = true;
+      } catch(e) {
+        console.warn('Termii fallback failed:', e.message);
+      }
+    }
+
+    if (!smsSent) {
+      res.status(500).json({ success: false, error: 'Failed to send SMS. Please try again.' });
       return;
     }
     res.json({ success: true, pinId });
