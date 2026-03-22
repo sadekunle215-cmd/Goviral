@@ -242,6 +242,17 @@ app.post('/peyflex/electricity', async (req, res) => {
 
 // ── TERMII OTP ──────────────────────────────────────────────────
 
+app.get('/testSms', async (req, res) => {
+  const status = {
+    kudisms_username: !!KUDISMS_USERNAME,
+    kudisms_password: !!KUDISMS_PASSWORD,
+    termii_key: !!TERMII_API_KEY,
+    node_version: process.version,
+    fetch_available: typeof fetch !== 'undefined'
+  };
+  res.json(status);
+});
+
 app.post('/kudismsSendOtp', async (req, res) => {
   const { phone, otp, pinId } = req.body;
   if (!phone || !otp) return res.status(400).json({ success: false, error: 'Phone and OTP required' });
@@ -509,4 +520,15 @@ app.post('/vtpass/variations', async (req, res) => {
   }
   try {
     const response = await fetch(`${VTPASS_BASE_URL}/service-variations?serviceID=${serviceID}`, {
-      met
+      method: 'GET',
+      headers: vtpassAuth()
+    });
+    const data = await response.json();
+    res.json({ success: true, data });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`GoViral server running on port ${PORT}`));
