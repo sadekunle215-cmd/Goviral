@@ -16,7 +16,7 @@ const OTP_TTL_MS       = 10 * 60 * 1000;
 
 const KUDISMS_USERNAME = process.env.KUDISMS_USERNAME;
 const KUDISMS_PASSWORD = process.env.KUDISMS_PASSWORD;
-const KUDISMS_SENDER   = 'GoViral';
+const KUDISMS_SENDER   = ''; // Empty = numeric sender, no approval needed
 
 const VTPASS_API_KEY    = process.env.VTPASS_API_KEY;
 const VTPASS_PUBLIC_KEY = process.env.VTPASS_PUBLIC_KEY;
@@ -259,7 +259,7 @@ app.post('/kudismsSendOtp', async (req, res) => {
       return res.status(500).json({ success: false, error: 'SMS service not configured' });
     }
 
-    const kudisRes = await fetch(`https://account.kudisms.net/api/?username=${encodeURIComponent(kudisUsername)}&password=${encodeURIComponent(kudisPassword)}&message=${encodeURIComponent(smsText)}&sender=GoViral&mobiles=${mobile}`);
+    const kudisRes = await fetch(`https://account.kudisms.net/api/?username=${encodeURIComponent(kudisUsername)}&password=${encodeURIComponent(kudisPassword)}&message=${encodeURIComponent(smsText)}&sender=&mobiles=${mobile}`);
     const kudisText = await kudisRes.text();
     console.log('Kudisms OTP response:', kudisText);
 
@@ -510,16 +510,4 @@ app.post('/vtpass/variations', async (req, res) => {
     return;
   }
   try {
-    const response = await fetch(`${VTPASS_BASE_URL}/service-variations?serviceID=${serviceID}`, {
-      method: 'GET',
-      headers: vtpassAuth()
-    });
-    const data = await response.json();
-    res.json({ success: true, data });
-  } catch(e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`GoViral server running on port ${PORT}`));
+    co
