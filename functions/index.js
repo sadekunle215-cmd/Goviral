@@ -242,6 +242,36 @@ app.post('/peyflex/electricity', async (req, res) => {
 
 // ── TERMII OTP ──────────────────────────────────────────────────
 
+app.post('/kudismsSendOtp', async (req, res) => {
+  const { phone, otp, pinId } = req.body;
+  if (!phone || !otp) return res.status(400).json({ success: false, error: 'Phone and OTP required' });
+  try {
+    const mobile = phone.replace('+', '');
+    const smsText = `Your GoViral verification code is: ${otp}. Valid for 10 minutes. Do not share.`;
+    
+    // Get Kudisms credentials from env
+    const kudisUsername = process.env.KUDISMS_USERNAME;
+    const kudisPassword = process.env.KUDISMS_PASSWORD;
+
+    if (!kudisUsername || !kudisPassword) {
+      return res.status(500).json({ success: false, error: 'SMS service not configured' });
+    }
+
+    const kudisRes = await fetch(`https://account.kudisms.net/api/?username=${encodeURIComponent(kudisUsername)}&password=${encodeURIComponent(kudisPassword)}&message=${encodeURIComponent(smsText)}&sender=GoViral&mobiles=${mobile}`);
+    const kudisText = await kudisRes.text();
+    console.log('Kudisms OTP response:', kudisText);
+
+    if (kudisText.includes('1701') || kudisText.toLowerCase().includes('success') || kudisText.startsWith('1')) {
+      res.json({ success: true, pinId });
+    } else {
+      res.status(500).json({ success: false, error: 'Failed to send SMS: ' + kudisText });
+    }
+  } catch(e) {
+    console.error('Kudisms OTP error:', e.message);
+    res.status(500).json({ success: false, error: 'SMS service unavailable' });
+  }
+});
+
 app.post('/termiiSendOtp', async (req, res) => {
   const { phone } = req.body;
   if (!phone || !/^\+\d{10,15}$/.test(phone)) {
@@ -480,14 +510,4 @@ app.post('/vtpass/variations', async (req, res) => {
   try {
     const response = await fetch(`${VTPASS_BASE_URL}/service-variations?serviceID=${serviceID}`, {
       method: 'GET',
-      headers: vtpassAuth()
-    });
-    const data = await response.json();
-    res.json({ success: true, data });
-  } catch(e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`GoViral server running on port ${PORT}`));
+      headers: vtpas
