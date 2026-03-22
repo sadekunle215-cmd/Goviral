@@ -1,7 +1,5 @@
 const express = require('express');
 const admin = require('firebase-admin');
-// Use built-in fetch (Node 18+) or fallback
-const fetch = globalThis.fetch || require('node-fetch');
 const app = express();
 app.use(express.json());
 
@@ -510,4 +508,5 @@ app.post('/vtpass/variations', async (req, res) => {
     return;
   }
   try {
-    co
+    const response = await fetch(`${VTPASS_BASE_URL}/service-variations?serviceID=${serviceID}`, {
+      met
