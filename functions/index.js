@@ -1,5 +1,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
+// Use built-in fetch (Node 18+) or fallback
+const fetch = globalThis.fetch || require('node-fetch');
 const app = express();
 app.use(express.json());
 
@@ -510,4 +512,14 @@ app.post('/vtpass/variations', async (req, res) => {
   try {
     const response = await fetch(`${VTPASS_BASE_URL}/service-variations?serviceID=${serviceID}`, {
       method: 'GET',
-      headers: vtpas
+      headers: vtpassAuth()
+    });
+    const data = await response.json();
+    res.json({ success: true, data });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`GoViral server running on port ${PORT}`));
