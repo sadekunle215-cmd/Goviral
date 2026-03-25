@@ -2299,6 +2299,8 @@ onAuthStateChanged(auth, async user => {
       startNotifPolling(CU.uid);
       if (window._gvobMaybeTrigger) window._gvobMaybeTrigger(_isNewUser);
       setTimeout(() => checkEscrowReleases(), 3000);
+      // Auto-approve pending submissions older than 24h (worker side)
+      setTimeout(() => checkPendingAutoApprove(), 5000);
       // Check for duplicate device login — warn admin
       setTimeout(() => checkDuplicateDeviceLogin(), 4000);
       // Defer non-critical tasks so dashboard renders first
@@ -2318,6 +2320,11 @@ onAuthStateChanged(auth, async user => {
       window._presenceTimer = setInterval(() => {
         if (CU) updateDoc(doc(db,'goviral_users', CU.uid), { lastSeen: serverTimestamp(), isOnline: true }).catch(()=>{});
       }, 60000);
+      // Poll every 30 min — auto-approve pending subs that exceeded 24h while app is open
+      if (window._pendingApproveTimer) clearInterval(window._pendingApproveTimer);
+      if (CU && CU.role === 'worker') {
+        window._pendingApproveTimer = setInterval(() => checkPendingAutoApprove().catch(()=>{}), 30 * 60 * 1000);
+      }
     }
   } else {
     CU = null;
@@ -2669,6 +2676,7 @@ window.doLogout = async function() {
     try { await updateDoc(doc(db,'goviral_users', CU.uid), { isOnline: false, lastSeen: serverTimestamp() }); } catch(e) {}
   }
   if (window._presenceTimer) { clearInterval(window._presenceTimer); window._presenceTimer = null; }
+  if (window._pendingApproveTimer) { clearInterval(window._pendingApproveTimer); window._pendingApproveTimer = null; }
   await signOut(auth);
   showPage('landing');
   toast('Signed out');
@@ -3929,6 +3937,81 @@ async function checkEscrowReleases() {
   } catch(e) { console.warn('Escrow release error:', e.message); }
 }
 
+// ── Worker-side: auto-approve pending (manual-review) submissions older than 24h ──
+// This runs on worker login so pending subs never get stuck forever
+async function checkPendingAutoApprove() {
+  if (!CU || CU.role !== 'worker') return;
+  try {
+    const MS_24H = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const snap = await getDocs(query(
+      collection(db,'goviral_submissions'),
+      where('workerUid','==',CU.uid),
+      where('status','==','pending'),
+      limit(100)
+    ));
+    if (snap.empty) return;
+    const rates = await getCommissionRates();
+    let released = 0;
+    for (const d of snap.docs) {
+      const s = d.data();
+      const subMs = s.createdAt?.seconds ? s.createdAt.seconds * 1000 : null;
+      if (!subMs || (now - subMs) < MS_24H) continue;
+
+      // Re-read the submission live to guard against double-payment
+      // (business may have approved it between our query and now)
+      const freshSnap = await getDoc(doc(db,'goviral_submissions', d.id));
+      if (!freshSnap.exists() || freshSnap.data().status !== 'pending') continue;
+
+      // Over 24h with no business action — auto-approve
+      const tierBonus = rates[CU.twitterTier === 'blue' ? 'blueTierBonus' : CU.twitterTier === 'followers100' ? 'followers100TierBonus' : null] || 0;
+      const tierMultiplier = 1 + (tierBonus / 100);
+      const baseWorkerPay = Math.floor((s.pay||0) * rates.workerRate);
+      const workerPay = Math.floor(baseWorkerPay * tierMultiplier);
+      const platformFee = Math.max(0, (s.pay||0) - workerPay);
+      // Mark approved FIRST before paying — prevents race condition double-pay
+      await updateDoc(doc(db,'goviral_submissions', d.id), { status: 'approved', autoApprovedAt: serverTimestamp() });
+      // Pay worker
+      await updateDoc(doc(db,'goviral_users', CU.uid), {
+        earnings: increment(workerPay), totalEarned: increment(workerPay)
+      });
+      CU.earnings = (CU.earnings||0) + workerPay;
+      // Business totalSpent + platform fee
+      await updateDoc(doc(db,'goviral_users', s.bizUid), { totalSpent: increment(s.pay||0) }).catch(()=>{});
+      try {
+        const adminSnap = await getDocs(query(collection(db,'goviral_users'), where('role','==','admin'), limit(1)));
+        if (!adminSnap.empty) await updateDoc(doc(db,'goviral_users', adminSnap.docs[0].id), {
+          wallet: increment(platformFee), totalPlatformFee: increment(platformFee)
+        });
+      } catch(e) {}
+      // Affiliate
+      if (CU.referredBy) {
+        const affPay = Math.floor((s.pay||0) * (rates.affiliateWorkerRate||0));
+        if (affPay > 0) {
+          await updateDoc(doc(db,'goviral_users', CU.referredBy), {
+            affiliateEarnings: increment(affPay), earnings: increment(affPay)
+          }).catch(()=>{});
+        }
+      }
+      // Campaigns + levels
+      try { await checkAndUpdateLevel(CU.uid, CU.totalEarned||0); } catch(e) {}
+      try { await checkAutoRenewal(s.taskId); } catch(e) {}
+      checkWorkerCampaignProgress(CU.uid).catch(()=>{});
+      createNotif(CU.uid, {
+        icon: '✅',
+        title: 'Submission Auto-Approved!',
+        message: `${fmtMoney(workerPay)} from "${s.taskTitle||'your task'}" was auto-approved after 24h. Earnings added to your wallet! 🎉`
+      }).catch(()=>{});
+      released++;
+    }
+    if (released > 0) {
+      const navPill = document.getElementById('navPillAmt');
+      if (navPill) navPill.textContent = fmtMoney(CU.earnings);
+      toast(`✅ ${released} pending submission${released>1?'s':''} auto-approved after 24h!`, 'ok');
+    }
+  } catch(e) { console.warn('Pending auto-approve error:', e.message); }
+}
+
 window.clearTaskFilters = function() { fillWorkerTasks('all','default',0,0,'all'); };
 
 async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterMaxPay, filterTier) {
@@ -3986,7 +4069,12 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
   const snap = await getDocs(query(collection(db,'goviral_tasks'), where('status','==','active'), limit(100)));
   const mySnap = await getDocs(query(collection(db,'goviral_submissions'), where('workerUid','==',CU.uid)));
   const doneTaskIds = new Set();
-  mySnap.forEach(d => doneTaskIds.add(d.data().taskId));
+  // Only exclude tasks that are pending/approved/escrow — NOT rejected
+  // Rejected submissions allow resubmit; also fixes role-switched users seeing tasks
+  mySnap.forEach(d => {
+    const s = d.data();
+    if (s.status !== 'rejected') doneTaskIds.add(s.taskId);
+  });
 
   const now = new Date();
   const medals = ['','🥇','🥈','🥉','🏅'];
@@ -4022,7 +4110,7 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
       return;
     }
     // Featured tasks are ALWAYS shown to everyone — businesses pay for this guaranteed visibility
-    if (!canDo && !isFeatured) return;
+    // Non-featured tasks with canDo=false are still shown but locked (so switched users see tasks)
     if (isFeatured) featured.push({id: d.id, ...t, _startsAt: startsAt, _expiresAt: expiresAt, _canDo: true});
     else regular.push({id: d.id, ...t, _canDo: canDo});
   });
@@ -4263,6 +4351,18 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
   }
 
   // Regular tasks with inline ads every 3
+  // Check if tasks exist but worker can't do any (needs social verification)
+  const allLocked = filteredRegular.length > 0 && filteredRegular.every(t => !t._canDo);
+  if (allLocked) {
+    html += `<div style="background:rgba(245,166,35,0.1);border:1px solid rgba(245,166,35,0.3);border-radius:12px;padding:16px 18px;margin-bottom:14px;display:flex;align-items:flex-start;gap:12px;">
+      <span style="font-size:1.4rem;flex-shrink:0;">🔐</span>
+      <div>
+        <div style="font-weight:700;font-size:.9rem;color:var(--gold);margin-bottom:4px;">Verify a social account to unlock tasks</div>
+        <p style="color:var(--mut);font-size:.82rem;line-height:1.6;margin-bottom:10px;">Tasks are visible but locked until you verify the matching social media account. Go to <strong style="color:var(--txt);">Profile → Verify Account</strong> to get started.</p>
+        <button class="btn btn-sm" style="background:rgba(245,166,35,0.15);color:var(--gold);border:1px solid rgba(245,166,35,0.4);" onclick="switchPanel('workerProfile')">✅ Verify Now →</button>
+      </div>
+    </div>`;
+  }
   if (filteredRegular.length === 0 && featured.length === 0) {
     html += `<div class="panel"><p style="color:var(--mut);">${regular.length > 0 ? 'No tasks match your current filters. Try clearing them.' : 'No tasks available right now.'}</p></div>`;
   } else {
@@ -4576,7 +4676,9 @@ window.doSubmitTask = async function() {
   try {
     const existing = await getDocs(query(collection(db,'goviral_submissions'),
       where('workerUid','==',CU.uid), where('taskId','==',taskId)));
-    if (!existing.empty) { toast('Already submitted this task','err'); btn.disabled=false; btn.textContent='Submit Proof'; return; }
+    // Allow resubmission if previous attempt was rejected
+    const activeExisting = existing.docs.filter(d => d.data().status !== 'rejected');
+    if (activeExisting.length > 0) { toast('Already submitted this task','err'); btn.disabled=false; btn.textContent='Submit Proof'; return; }
 
     // ── DUPLICATE IMAGE FINGERPRINT CHECK ──
     // Block reuse of the same original image across different tasks (by anyone)
@@ -4672,6 +4774,8 @@ window.doSubmitTask = async function() {
 async function fillWorkerHistory() {
   let el = document.getElementById('dp_workerHistory');
   el.innerHTML = '<div class="dash-header"><div class="dash-title">MY SUBMISSIONS</div></div><div class="gv-wave-loader"><div class="loader-dots" style="justify-content:center;margin:32px auto 10px;"><span></span><span></span><span></span></div></div>';
+  // Silently check and release any stuck pending submissions before rendering
+  checkPendingAutoApprove().catch(()=>{});
   const snap = await getDocs(query(collection(db,'goviral_submissions'), where('workerUid','==',CU.uid)));
   let html = '<div class="dash-header"><div class="dash-title">MY SUBMISSIONS</div></div>';
   if (snap.empty) { el.innerHTML = html + '<div class="panel"><p style="color:var(--mut);">No submissions yet. Browse tasks to start earning!</p></div>'; return; }
