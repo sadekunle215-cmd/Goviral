@@ -78,14 +78,20 @@
   ],
   "rewrites": [
     {
-      "source": "/9aa42ed324c46ba7e4f25e3ac0b5fbc0.txt",
-      "destination": "/9aa42ed324c46ba7e4f25e3ac0b5fbc0.txt"
-    },
-    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
   ],
   "cleanUrls": true,
-  "trailingSlash": false
+  "trailingSlash": false,
+  "routes": [
+    {
+      "src": "/9aa42ed324c46ba7e4f25e3ac0b5fbc0.txt",
+      "dest": "/9aa42ed324c46ba7e4f25e3ac0b5fbc0.txt"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ]
 }
