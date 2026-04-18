@@ -5651,6 +5651,7 @@ window.submitVerification = async function(platformId, platformLabel) {
     });
 
     closeModal('mVerify');
+    if (window._panelCache) delete window._panelCache['workerTasks']; // bust stale task cache so new platform shows immediately
     toast('Verification submitted! Admin will review within 24hrs ✅','ok');
     fillWorkerProfile();
   } catch(e) { toast('Failed: '+e.message,'err'); btn.disabled=false; btn.textContent='Submit for Verification'; }
@@ -6209,7 +6210,10 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
     t._tierOk = tierOk; // pass to renderTask
     const startsAt = t.featuredStartsAt ? (t.featuredStartsAt.toDate ? t.featuredStartsAt.toDate() : new Date(t.featuredStartsAt)) : null;
     const expiresAt = t.featuredExpiresAt ? (t.featuredExpiresAt.toDate ? t.featuredExpiresAt.toDate() : new Date(t.featuredExpiresAt)) : null;
-    const isFeatured = t.featuredPosition > 0 && expiresAt && expiresAt > now && (!startsAt || startsAt <= now);
+    // Featured if position is paid for AND not yet expired (null expiry = show forever until task ends)
+    const isExpired = expiresAt && expiresAt <= now;
+    const isFeatured = t.featuredPosition > 0 && !isExpired;
+    const isQueued = isFeatured && startsAt && startsAt > now; // paid but starts in future
     // Separate done tasks into their own array
     if (doneTaskIds.has(d.id)) {
       doneTasks.push({id: d.id, ...t, _canDo: false, _done: true});
@@ -6217,7 +6221,7 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
     }
     // Featured tasks are ALWAYS shown to everyone — businesses pay for this guaranteed visibility
     // Non-featured tasks with canDo=false are still shown but locked (so switched users see tasks)
-    if (isFeatured) featured.push({id: d.id, ...t, _startsAt: startsAt, _expiresAt: expiresAt, _canDo: canDo});
+    if (isFeatured) featured.push({id: d.id, ...t, _startsAt: startsAt, _expiresAt: expiresAt, _canDo: canDo, _isQueued: isQueued});
     else regular.push({id: d.id, ...t, _canDo: canDo});
   });
   featured.sort((a,b) => a.featuredPosition - b.featuredPosition);
@@ -6264,8 +6268,11 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
   function renderTask(t, isFeat, taskNum) {
     const tierOk = t._tierOk !== false;
     const medal = isFeat ? medals[t.featuredPosition] || '🏅' : '';
-    const remainMs = isFeat && t._expiresAt ? (t._expiresAt - now) : 0;
-    const remainStr = remainMs > 0 ? (() => { const h=Math.floor(remainMs/3600000),m=Math.floor((remainMs%3600000)/60000); return h>0?`${h}hr${h>1?'s':''} ${m>0?m+'min':''}`.trim():`${m}min`; })() : '';
+    const remainMs = isFeat && !t._isQueued && t._expiresAt ? (t._expiresAt - now) : 0;
+    const queueMs = t._isQueued && t._startsAt ? (t._startsAt - now) : 0;
+    const remainStr = t._isQueued && queueMs > 0
+      ? (() => { const h=Math.floor(queueMs/3600000),m=Math.floor((queueMs%3600000)/60000); return `Queued · starts in ${h>0?`${h}hr${h>1?'s':''}`.trim():`${m}min`}`; })()
+      : remainMs > 0 ? (() => { const h=Math.floor(remainMs/3600000),m=Math.floor((remainMs%3600000)/60000); return h>0?`${h}hr${h>1?'s':''} ${m>0?m+'min':''}`.trim():`${m}min`; })() : '';
     const canDo = t._canDo !== false;
     const tierRequired = t.workerTierRequired || 'all';
     const tierLocked = !canDo && tierRequired !== 'all' && (verifiedTaskPlatforms.has(t.platform) || t.platform === 'Vote');
@@ -9321,6 +9328,7 @@ window.doPostTask = async function() {
   const featHours = _ptFeaturedPos > 0 ? (parseInt(document.getElementById('ptPosHours').value)||0) : 0;
   const featRate = _ptFeaturedPos > 0 ? (_ptFeaturedRates['pos'+_ptFeaturedPos]||0) : 0;
   const featCost = _ptFeaturedPos > 0 && featHours > 0 ? featRate * featHours : 0;
+  if (_ptFeaturedPos > 0 && featHours < 1) { toast('Enter how many hours for the featured position','err'); return; }
   const grandTotal = taskCost + featCost;
 
   const snap = await getDoc(doc(db,'goviral_users', CU.uid));
@@ -14213,12 +14221,47 @@ if ('serviceWorker' in navigator) {
         })
       );
     });
+    // ── Notification action handler ──
+    self.addEventListener('notificationclick', e => {
+      e.notification.close();
+      const action = e.action || 'default';
+      const data = e.notification.data || {};
+      const role = data.role || 'worker';
+      let panel;
+      if (action === 'profile')      panel = role === 'business' ? 'bizOverview'     : 'workerProfile';
+      else if (action === 'tasks')   panel = role === 'business' ? 'bizSubmissions'  : 'workerTasks';
+      else if (action === 'market')  panel = 'marketplace';
+      else if (action === 'wallet')  panel = role === 'business' ? 'bizWallet'       : 'workerWithdraw';
+      else panel = data.defaultPanel || (role === 'business' ? 'bizOverview' : 'workerTasks');
+      e.waitUntil(
+        clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+          for (const c of list) {
+            if ('focus' in c) {
+              c.focus();
+              c.postMessage({ type: 'GV_NAVIGATE', panel });
+              return;
+            }
+          }
+          return clients.openWindow('/');
+        })
+      );
+    });
   `;
   const blob = new Blob([swCode], {type:'application/javascript'});
   const swUrl = URL.createObjectURL(blob);
   window.addEventListener('load', () => {
     navigator.serviceWorker.register(swUrl)
       .then(reg => {
+        // Store registration so push notifications can use action buttons
+        window._swReg = reg;
+        // Listen for SW messages (panel navigation from notification taps)
+        navigator.serviceWorker.addEventListener('message', e => {
+          if (e.data && e.data.type === 'GV_NAVIGATE') {
+            const p = e.data.panel;
+            if (p === 'marketplace') { if (window.openMarketplacePanel) window.openMarketplacePanel(); }
+            else if (window.switchPanel) window.switchPanel(p);
+          }
+        });
         
         // Check for updates every time the page loads
         reg.update();
@@ -18442,6 +18485,13 @@ function _schedulePushCheck() {
 
 let _lastPushTaskCount = null;
 let _lastPushTaskIds = new Set();
+
+// ── Notification action icon constants (SVG data URIs) ──
+const _GV_NOTIF_ICON_PROFILE    = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Ccircle cx='24' cy='16' r='9' fill='%23fff'/%3E%3Cpath d='M8 42c0-8.8 7.2-16 16-16s16 7.2 16 16' stroke='%23fff' stroke-width='3.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E";
+const _GV_NOTIF_ICON_TASKS      = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect x='8' y='6' width='32' height='36' rx='4' fill='none' stroke='%23fff' stroke-width='3'/%3E%3Cpath d='M15 18h18M15 26h18M15 34h10' stroke='%23fff' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E";
+const _GV_NOTIF_ICON_MARKET     = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath d='M10 14h28l-3 16H13z' fill='%23fff'/%3E%3Ccircle cx='17' cy='37' r='3' fill='%23fff'/%3E%3Ccircle cx='31' cy='37' r='3' fill='%23fff'/%3E%3Cpath d='M6 8h5l3 6' stroke='%23fff' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E";
+const _GV_NOTIF_ICON_WALLET     = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect x='5' y='14' width='38' height='26' rx='5' fill='none' stroke='%23fff' stroke-width='3'/%3E%3Cpath d='M5 22h38' stroke='%23fff' stroke-width='2.5'/%3E%3Ccircle cx='35' cy='31' r='3.5' fill='%23fff'/%3E%3Cpath d='M14 8h20' stroke='%23fff' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E";
+
 async function _checkNewTasksForPush() {
   if (!CU || CU.role !== 'worker') return;
   if (Notification.permission !== 'granted') return;
@@ -18466,13 +18516,25 @@ async function _checkNewTasksForPush() {
       const body = newTasks.length === 1
         ? `${platformIcon(firstNew.platform)} ${firstNew.platform} — Earn ₦${Math.floor(firstNew.pay*0.8).toLocaleString()}. Open GoViral now!`
         : `Earn up to ₦${Math.floor(Math.max(...newTasks.map(d=>d.data().pay))*0.8).toLocaleString()}. Open GoViral to grab them!`;
-      new Notification(title, {
+      const notifOpts = {
         body,
         icon: '/favicon.ico',
         badge: '/favicon.ico',
         tag: 'goviral-new-tasks',
         requireInteraction: false,
-      });
+        data: { role: 'worker', defaultPanel: 'workerTasks', taskCount: available.length },
+        actions: [
+          { action: 'profile', title: '👤 Profile',                         icon: _GV_NOTIF_ICON_PROFILE },
+          { action: 'tasks',   title: `📋 Tasks (${available.length})`,     icon: _GV_NOTIF_ICON_TASKS   },
+          { action: 'market',  title: '🛒 Marketplace',                     icon: _GV_NOTIF_ICON_MARKET  },
+          { action: 'wallet',  title: '💰 Wallet',                          icon: _GV_NOTIF_ICON_WALLET  },
+        ],
+      };
+      if (window._swReg && window._swReg.showNotification) {
+        window._swReg.showNotification(title, notifOpts);
+      } else {
+        new Notification(title, notifOpts);
+      }
     }
 
     // Update tracked IDs
@@ -18677,12 +18739,27 @@ async function _checkBizSubmissionPush() {
     const count = snap.size;
     if (_lastBizSubCount !== null && count > _lastBizSubCount) {
       const diff = count - _lastBizSubCount;
-      new Notification(`📥 ${diff} new submission${diff>1?'s':''} on GoViral!`, {
-        body: `${diff} worker${diff>1?'s have':' has'} submitted proof for your tasks. Open GoViral to review.`,
+      const bizTitle = `📥 ${diff} new submission${diff>1?'s':''} on GoViral!`;
+      const bizBody = `${diff} worker${diff>1?'s have':' has'} submitted proof for your tasks. Open GoViral to review.`;
+      const bizNotifOpts = {
+        body: bizBody,
         icon: '/favicon.ico',
+        badge: '/favicon.ico',
         tag: 'goviral-new-submissions',
         requireInteraction: true,
-      });
+        data: { role: 'business', defaultPanel: 'bizSubmissions', pendingCount: count },
+        actions: [
+          { action: 'profile', title: '👤 Profile',                   icon: _GV_NOTIF_ICON_PROFILE },
+          { action: 'tasks',   title: `📋 Pending (${count})`,        icon: _GV_NOTIF_ICON_TASKS   },
+          { action: 'market',  title: '🛒 Marketplace',               icon: _GV_NOTIF_ICON_MARKET  },
+          { action: 'wallet',  title: '💰 Wallet',                    icon: _GV_NOTIF_ICON_WALLET  },
+        ],
+      };
+      if (window._swReg && window._swReg.showNotification) {
+        window._swReg.showNotification(bizTitle, bizNotifOpts);
+      } else {
+        new Notification(bizTitle, bizNotifOpts);
+      }
     }
     _lastBizSubCount = count;
   } catch(e) {}
