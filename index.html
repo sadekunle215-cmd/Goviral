@@ -6174,14 +6174,15 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
   const verifiedTaskPlatforms = new Set([...verifiedPlatformIds].map(id => platformIdToName[id]).filter(Boolean));
 
 // Fetch featured tasks separately so they're NEVER cut off by the limit(100) cap
+  // Featured query uses single-field only — no composite index needed in Firestore
   const [snap, featuredSnap] = await Promise.all([
     getDocs(query(collection(db,'goviral_tasks'), where('status','==','active'), limit(100))),
-    getDocs(query(collection(db,'goviral_tasks'), where('status','==','active'), where('featuredPosition','>',0)))
+    getDocs(query(collection(db,'goviral_tasks'), where('featuredPosition','>',0)))
   ]);
-  // Merge: featured snap overrides any duplicate in main snap
+  // Merge — featured entries override duplicates, filter to active only
   const _allDocsMap = new Map();
   snap.forEach(d => _allDocsMap.set(d.id, d));
-  featuredSnap.forEach(d => _allDocsMap.set(d.id, d)); // featured always wins
+  featuredSnap.forEach(d => { if (d.data().status === 'active') _allDocsMap.set(d.id, d); });
   const _allDocs = [..._allDocsMap.values()];
   const mySnap = await getCachedWorkerSubs();
   const doneTaskIds = new Set();
