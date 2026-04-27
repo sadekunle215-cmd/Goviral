@@ -6223,15 +6223,20 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
     const canDo = platformOk && tierOk && slotsAvailable;
     t._tierOk = tierOk; // pass to renderTask
     t._slotsAvailable = slotsAvailable; // pass to renderTask for "slots full" locked state
-    // Separate done tasks into their own array
+    // Featured tasks ALWAYS shown — businesses pay for guaranteed visibility
+    // Check featured FIRST so doneTaskIds never silently removes them
+    if (isFeatured) {
+      const isDone = doneTaskIds.has(d.id);
+      featured.push({id: d.id, ...t, _startsAt: startsAt, _expiresAt: expiresAt, _canDo: canDo && !isDone, _isQueued: isQueued, _done: isDone});
+      return; // featured takes priority — skip doneTasks and regular
+    }
+    // Non-featured: separate done tasks into their own collapsible section
     if (doneTaskIds.has(d.id)) {
       doneTasks.push({id: d.id, ...t, _canDo: false, _done: true});
       return;
     }
-    // Featured tasks are ALWAYS shown to everyone — businesses pay for this guaranteed visibility
-    // Non-featured tasks with canDo=false are still shown but locked (so switched users see tasks)
-    if (isFeatured) featured.push({id: d.id, ...t, _startsAt: startsAt, _expiresAt: expiresAt, _canDo: canDo, _isQueued: isQueued});
-    else regular.push({id: d.id, ...t, _canDo: canDo});
+    // Non-featured tasks with canDo=false are still shown but locked (so role-switched users see tasks)
+    regular.push({id: d.id, ...t, _canDo: canDo});
   });
   featured.sort((a,b) => a.featuredPosition - b.featuredPosition);
 
@@ -6283,10 +6288,13 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
       ? (() => { const h=Math.floor(queueMs/3600000),m=Math.floor((queueMs%3600000)/60000); return `Queued · starts in ${h>0?`${h}hr${h>1?'s':''}`.trim():`${m}min`}`; })()
       : remainMs > 0 ? (() => { const h=Math.floor(remainMs/3600000),m=Math.floor((remainMs%3600000)/60000); return h>0?`${h}hr${h>1?'s':''} ${m>0?m+'min':''}`.trim():`${m}min`; })() : '';
     const canDo = t._canDo !== false;
+    const isDoneTask = t._done === true;
     const tierRequired = t.workerTierRequired || 'all';
-    const tierLocked = !canDo && tierRequired !== 'all' && (verifiedTaskPlatforms.has(t.platform) || t.platform === 'Vote');
+    const tierLocked = !canDo && !isDoneTask && tierRequired !== 'all' && (verifiedTaskPlatforms.has(t.platform) || t.platform === 'Vote');
     const tierLabel = tierRequired === 'blue' ? '✅ Twitter Blue' : '👥 100+ Followers';
-    const lockedBanner = (!canDo && isFeat) ? `<div style="display:flex;align-items:center;gap:10px;background:rgba(245,166,35,0.10);border:1.5px solid rgba(245,166,35,0.45);border-radius:10px;padding:10px 14px;margin-bottom:12px;"><span style="font-size:1.25rem;flex-shrink:0;">⚠️</span><div><div style="font-weight:700;font-size:.82rem;color:var(--gold);">${tierLocked ? `${tierLabel} required for this task` : `Verify ${t.platform} to complete this task`}</div><div style="font-size:.76rem;color:var(--mut);margin-top:2px;"><a onclick="switchPanel('${tierLocked ? 'workerElite' : 'workerProfile'}')" style="color:var(--gold);cursor:pointer;font-weight:600;text-decoration:underline;">${tierLocked ? 'View Elite Tasks →' : 'Verify now →'}</a></div></div></div>` : '';
+    const lockedBanner = (!canDo && isFeat) ? (isDoneTask
+      ? `<div style="display:flex;align-items:center;gap:10px;background:rgba(80,80,80,0.12);border:1.5px solid rgba(120,120,120,0.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;"><span style="font-size:1.25rem;flex-shrink:0;">✅</span><div style="font-weight:700;font-size:.82rem;color:var(--mut);">You've already completed this featured task</div></div>`
+      : `<div style="display:flex;align-items:center;gap:10px;background:rgba(245,166,35,0.10);border:1.5px solid rgba(245,166,35,0.45);border-radius:10px;padding:10px 14px;margin-bottom:12px;"><span style="font-size:1.25rem;flex-shrink:0;">⚠️</span><div><div style="font-weight:700;font-size:.82rem;color:var(--gold);">${tierLocked ? tierLabel+' required for this task' : 'Verify '+t.platform+' to complete this task'}</div><div style="font-size:.76rem;color:var(--mut);margin-top:2px;"><a onclick="switchPanel('${tierLocked ? 'workerElite' : 'workerProfile'}')" style="color:var(--gold);cursor:pointer;font-weight:600;text-decoration:underline;">${tierLocked ? 'View Elite Tasks →' : 'Verify now →'}</a></div></div></div>`) : '';
     const numBadge = (!isFeat && taskNum) ? `<div style="display:inline-flex;align-items:center;gap:6px;margin-bottom:10px;">
         <span style="display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:20px;padding:0 7px;border-radius:20px;background:linear-gradient(135deg,var(--red),#ff4444);color:#fff;font-size:.6rem;font-weight:800;letter-spacing:.5px;box-shadow:0 2px 8px rgba(224,22,26,0.5);animation:taskNumPulse 2.5s ease-in-out infinite;">#${taskNum}</span>
       </div>` : '';
@@ -6323,13 +6331,15 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
         <a href="${t.link}" target="_blank" class="btn btn-ghost btn-sm">🔗 Open Link</a>
         ${canDo
           ? `<button class="btn btn-red btn-sm" onclick="openSubmit('${t.id}','${t.title.replace(/'/g,"\\'")}')">Submit Proof</button>`
-          : t._slotsAvailable === false
-            ? `<button class="btn btn-sm" style="background:var(--dark4);color:var(--mut);border:1px solid var(--bdr);cursor:not-allowed;" disabled>🔒 Slots Full</button>`
-            : t.workerTierRequired && t.workerTierRequired !== 'all' && !tierOk
-              ? `<button class="btn btn-sm" style="background:rgba(29,161,242,0.1);color:#1DA1F2;border:1px solid rgba(29,161,242,0.3);cursor:not-allowed;gap:4px;" disabled>
-                  🔒 ${t.workerTierRequired === 'blue' ? 'Blue Tick Required' : '100+ Followers Required'}
-                 </button>`
-              : `<button class="btn btn-sm" style="background:var(--dark4);color:var(--mut);border:1px solid var(--bdr);cursor:not-allowed;" disabled>🔒 Verify ${t.platform} First</button>`
+          : isDoneTask
+            ? `<button class="btn btn-sm" style="background:var(--dark4);color:#555;border:1px solid #333;cursor:not-allowed;" disabled>✓ Already Done</button>`
+            : t._slotsAvailable === false
+              ? `<button class="btn btn-sm" style="background:var(--dark4);color:var(--mut);border:1px solid var(--bdr);cursor:not-allowed;" disabled>🔒 Slots Full</button>`
+              : t.workerTierRequired && t.workerTierRequired !== 'all' && !tierOk
+                ? `<button class="btn btn-sm" style="background:rgba(29,161,242,0.1);color:#1DA1F2;border:1px solid rgba(29,161,242,0.3);cursor:not-allowed;gap:4px;" disabled>
+                    🔒 ${t.workerTierRequired === 'blue' ? 'Blue Tick Required' : '100+ Followers Required'}
+                   </button>`
+                : `<button class="btn btn-sm" style="background:var(--dark4);color:var(--mut);border:1px solid var(--bdr);cursor:not-allowed;" disabled>🔒 Verify ${t.platform} First</button>`
         }
         ${canDo ? `<button onclick="showTaskWarning()" style="background:transparent;border:none;cursor:pointer;padding:4px 6px;font-size:1.1rem;opacity:.7;" title="Read before submitting">⚠️</button>` : ''}
         <button class="btn btn-ghost btn-sm" id="bm_${t.id}" onclick="toggleBookmark('${t.id}','${t.title.replace(/'/g,"\\'")}','${t.platform}',${t.pay})" style="margin-left:auto;padding:8px 10px;" title="Save task">
