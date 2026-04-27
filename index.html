@@ -6190,7 +6190,20 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
   let doneTasks = [];
   snap.forEach(d => {
     const t = d.data();
-    if ((t.slotsUsed||0) >= (t.slots||0)) return;
+    // ── Compute featured status FIRST (before any slot filtering) ──
+    // Businesses pay for guaranteed visibility, so featured tasks must always pass through.
+    const startsAt = t.featuredStartsAt ? (t.featuredStartsAt.toDate ? t.featuredStartsAt.toDate() : new Date(t.featuredStartsAt)) : null;
+    const expiresAt = t.featuredExpiresAt ? (t.featuredExpiresAt.toDate ? t.featuredExpiresAt.toDate() : new Date(t.featuredExpiresAt)) : null;
+    // Featured if position is paid for AND not yet expired (null expiry = show forever until task ends)
+    const isExpired = expiresAt && expiresAt <= now;
+    const isFeatured = t.featuredPosition > 0 && !isExpired;
+    const isQueued = isFeatured && startsAt && startsAt > now; // paid but starts in future
+
+    // Slot availability — checked AFTER featured so featured tasks are never silently dropped
+    const slotsAvailable = (t.slotsUsed||0) < (t.slots||0);
+    // Non-featured tasks with no slots left are invisible (nothing to submit)
+    if (!isFeatured && !slotsAvailable) return;
+
     // Check platform verification
     const platformOk = verifiedTaskPlatforms.has(t.platform) || t.platform === 'Vote' || t.platform === 'Playstore';
     // Check twitter tier requirement
@@ -6206,14 +6219,10 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
         if (exp < new Date()) tierOk = false;
       }
     }
-    const canDo = platformOk && tierOk;
+    // canDo: worker can actually submit (platform verified, tier met, and slots still open)
+    const canDo = platformOk && tierOk && slotsAvailable;
     t._tierOk = tierOk; // pass to renderTask
-    const startsAt = t.featuredStartsAt ? (t.featuredStartsAt.toDate ? t.featuredStartsAt.toDate() : new Date(t.featuredStartsAt)) : null;
-    const expiresAt = t.featuredExpiresAt ? (t.featuredExpiresAt.toDate ? t.featuredExpiresAt.toDate() : new Date(t.featuredExpiresAt)) : null;
-    // Featured if position is paid for AND not yet expired (null expiry = show forever until task ends)
-    const isExpired = expiresAt && expiresAt <= now;
-    const isFeatured = t.featuredPosition > 0 && !isExpired;
-    const isQueued = isFeatured && startsAt && startsAt > now; // paid but starts in future
+    t._slotsAvailable = slotsAvailable; // pass to renderTask for "slots full" locked state
     // Separate done tasks into their own array
     if (doneTaskIds.has(d.id)) {
       doneTasks.push({id: d.id, ...t, _canDo: false, _done: true});
@@ -6314,11 +6323,13 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
         <a href="${t.link}" target="_blank" class="btn btn-ghost btn-sm">🔗 Open Link</a>
         ${canDo
           ? `<button class="btn btn-red btn-sm" onclick="openSubmit('${t.id}','${t.title.replace(/'/g,"\\'")}')">Submit Proof</button>`
-          : t.workerTierRequired && t.workerTierRequired !== 'all' && !tierOk
-            ? `<button class="btn btn-sm" style="background:rgba(29,161,242,0.1);color:#1DA1F2;border:1px solid rgba(29,161,242,0.3);cursor:not-allowed;gap:4px;" disabled>
-                🔒 ${t.workerTierRequired === 'blue' ? 'Blue Tick Required' : '100+ Followers Required'}
-               </button>`
-            : `<button class="btn btn-sm" style="background:var(--dark4);color:var(--mut);border:1px solid var(--bdr);cursor:not-allowed;" disabled>🔒 Verify ${t.platform} First</button>`
+          : t._slotsAvailable === false
+            ? `<button class="btn btn-sm" style="background:var(--dark4);color:var(--mut);border:1px solid var(--bdr);cursor:not-allowed;" disabled>🔒 Slots Full</button>`
+            : t.workerTierRequired && t.workerTierRequired !== 'all' && !tierOk
+              ? `<button class="btn btn-sm" style="background:rgba(29,161,242,0.1);color:#1DA1F2;border:1px solid rgba(29,161,242,0.3);cursor:not-allowed;gap:4px;" disabled>
+                  🔒 ${t.workerTierRequired === 'blue' ? 'Blue Tick Required' : '100+ Followers Required'}
+                 </button>`
+              : `<button class="btn btn-sm" style="background:var(--dark4);color:var(--mut);border:1px solid var(--bdr);cursor:not-allowed;" disabled>🔒 Verify ${t.platform} First</button>`
         }
         ${canDo ? `<button onclick="showTaskWarning()" style="background:transparent;border:none;cursor:pointer;padding:4px 6px;font-size:1.1rem;opacity:.7;" title="Read before submitting">⚠️</button>` : ''}
         <button class="btn btn-ghost btn-sm" id="bm_${t.id}" onclick="toggleBookmark('${t.id}','${t.title.replace(/'/g,"\\'")}','${t.platform}',${t.pay})" style="margin-left:auto;padding:8px 10px;" title="Save task">
@@ -6338,12 +6349,13 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
     return gvRenderTaskAdSlot();
   }
 
-  // Build missed platforms warning
+  // Build missed platforms warning (include featured tasks regardless of slot status)
   const allSnap_platforms = new Set();
   snap.forEach(d => {
     const t = d.data();
     if (doneTaskIds.has(d.id)) return;
-    if ((t.slotsUsed||0) >= (t.slots||0)) return;
+    const isFeaturedTask = t.featuredPosition > 0;
+    if (!isFeaturedTask && (t.slotsUsed||0) >= (t.slots||0)) return;
     allSnap_platforms.add(t.platform);
   });
   const missedPlatforms = [...allSnap_platforms].filter(p => p !== 'Vote' && p !== 'Playstore' && !verifiedTaskPlatforms.has(p));
