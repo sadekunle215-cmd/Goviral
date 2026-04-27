@@ -9406,6 +9406,9 @@ window.doPostTask = async function() {
       : 'Task posted! Workers will start shortly 🚀', 'ok');
     // 🏆 Check campaign progress for business after posting task
     checkBizCampaignProgress(CU.uid).catch(()=>{});
+    // Bust stale caches so new task (especially featured) shows immediately
+    if (window._panelCache) delete window._panelCache['workerTasks'];
+    window.invalidateSubsCache && window.invalidateSubsCache();
     // Trigger instant push check — workers get notified immediately
     _lastPushTaskCount = null; // reset so next check fires notification
     fillBizTasks();
