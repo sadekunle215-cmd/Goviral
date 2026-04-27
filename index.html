@@ -6173,7 +6173,16 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
   };
   const verifiedTaskPlatforms = new Set([...verifiedPlatformIds].map(id => platformIdToName[id]).filter(Boolean));
 
-  const snap = await getDocs(query(collection(db,'goviral_tasks'), where('status','==','active'), limit(100)));
+// Fetch featured tasks separately so they're NEVER cut off by the limit(100) cap
+  const [snap, featuredSnap] = await Promise.all([
+    getDocs(query(collection(db,'goviral_tasks'), where('status','==','active'), limit(100))),
+    getDocs(query(collection(db,'goviral_tasks'), where('status','==','active'), where('featuredPosition','>',0)))
+  ]);
+  // Merge: featured snap overrides any duplicate in main snap
+  const _allDocsMap = new Map();
+  snap.forEach(d => _allDocsMap.set(d.id, d));
+  featuredSnap.forEach(d => _allDocsMap.set(d.id, d)); // featured always wins
+  const _allDocs = [..._allDocsMap.values()];
   const mySnap = await getCachedWorkerSubs();
   const doneTaskIds = new Set();
   // Only exclude tasks that are pending/approved/escrow — NOT rejected
@@ -6188,7 +6197,7 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
   let featured = [], regular = [];
 
   let doneTasks = [];
-  snap.forEach(d => {
+  _allDocs.forEach(d => {
     const t = d.data();
     // ── Compute featured status FIRST (before any slot filtering) ──
     // Businesses pay for guaranteed visibility, so featured tasks must always pass through.
@@ -6240,28 +6249,7 @@ async function fillWorkerTasks(filterPlatform, filterSort, filterMinPay, filterM
   });
   featured.sort((a,b) => a.featuredPosition - b.featuredPosition);
 
-  // TEMP DEBUG PANEL
-  let _dbgRows = [];
-  snap.forEach(d => {
-    const t = d.data();
-    if ((t.featuredPosition||0) > 0) {
-      const exp = t.featuredExpiresAt ? (t.featuredExpiresAt.toDate ? t.featuredExpiresAt.toDate().toISOString() : t.featuredExpiresAt) : 'NULL';
-      const now2 = new Date();
-      const expDate = t.featuredExpiresAt ? (t.featuredExpiresAt.toDate ? t.featuredExpiresAt.toDate() : new Date(t.featuredExpiresAt)) : null;
-      const expired = expDate ? expDate <= now2 : false;
-      const inDone = doneTaskIds.has(d.id);
-      _dbgRows.push('<div style="font-size:.7rem;padding:4px 0;border-bottom:1px solid #333;">'+
-        '<b>pos='+t.featuredPosition+'</b> '+t.title+
-        '<br>expires: '+exp+
-        '<br>expired='+expired+' | inDone='+inDone+' | status='+t.status+
-        '</div>');
-    }
-  });
-  el.innerHTML = '<div style="background:#111;border:2px solid #f5a623;border-radius:12px;padding:14px;margin-bottom:16px;">'+
-    '<div style="color:#f5a623;font-weight:800;margin-bottom:8px;">🔍 DEBUG: Featured Tasks in DB</div>'+
-    '<div style="color:#aaa;font-size:.72rem;margin-bottom:8px;">Total fetched: '+snap.size+' | Featured found: '+featured.length+' | Done IDs: '+doneTaskIds.size+'</div>'+
-    (_dbgRows.length > 0 ? _dbgRows.join('') : '<div style="color:red;font-size:.75rem;">No tasks with featuredPosition &gt; 0 found in DB!</div>')+
-    '</div>' + el.innerHTML;
+
 
   // ── All unique platforms for filter chips ──
   const allPlatforms = [...new Set([...featured, ...regular].map(t => t.platform))].sort();
